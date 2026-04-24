@@ -7,6 +7,11 @@ export function setupAudio() {
     ringtone.preload = "auto";
 
     remoteAudio = document.getElementById("remote-audio") || null;
+    if (remoteAudio) {
+        remoteAudio.autoplay = true;
+        remoteAudio.muted = false;
+        remoteAudio.volume = 1;
+    }
 }
 
 export async function playRingtone() {

@@ -257,7 +257,7 @@ async function resetExpiredCallsIfNeeded() {
 
     Object.values(state.channels).forEach((channel) => {
         if (channel?.status === "chamando" && channel?.timeoutAt && channel.timeoutAt < now) {
-            tasks.push(resetChannel(channel.id, "Timeout automatico"));
+            tasks.push(resetCallChannels(channel.id, channel.callerChannelId || channel.peerChannelId || "", "Timeout automatico"));
         }
     });
 
@@ -338,10 +338,11 @@ function renderMembers(channelId, members) {
 
 async function startCall(channelId, targetId, targetName) {
     const channelRef = ref(database, `${APP_ROOT}/channels/${channelId}`);
+    const callerChannelId = state.user.homeChannelId;
     const callId = push(ref(database, `${APP_ROOT}/calls`)).key;
     const now = Date.now();
 
-    console.log("[call] Tentando iniciar chamada", { channelId, targetId, targetName, callId });
+    console.log("[call] Tentando iniciar chamada", { channelId, callerChannelId, targetId, targetName, callId });
 
     const transaction = await runTransaction(channelRef, (current) => {
         const channel = current || {};
@@ -357,6 +358,8 @@ async function startCall(channelId, targetId, targetName) {
             calleeId: targetId,
             calleeName: targetName,
             callId,
+            callerChannelId,
+            peerChannelId: callerChannelId,
             ringStartedAt: now,
             timeoutAt: now + CALL_TIMEOUT_MS
         };
@@ -369,13 +372,28 @@ async function startCall(channelId, targetId, targetName) {
 
     state.currentCall = {
         channelId,
+        callerChannelId,
         callId,
         role: "caller",
         peerName: targetName
     };
 
+    await update(ref(database, `${APP_ROOT}/channels/${callerChannelId}`), {
+        status: "chamando",
+        callerId: state.user.id,
+        callerName: state.user.name,
+        calleeId: targetId,
+        calleeName: targetName,
+        callId,
+        callerChannelId,
+        peerChannelId: channelId,
+        ringStartedAt: now,
+        timeoutAt: now + CALL_TIMEOUT_MS
+    });
+
     await set(ref(database, `${APP_ROOT}/calls/${callId}/meta`), {
         channelId,
+        callerChannelId,
         callerId: state.user.id,
         callerName: state.user.name,
         calleeId: targetId,
@@ -411,6 +429,7 @@ function syncIncomingCallState() {
 
     state.incomingCall = {
         channelId: incomingChannel.id,
+        callerChannelId: incomingChannel.callerChannelId || incomingChannel.peerChannelId || "",
         callId: incomingChannel.callId,
         callerId: incomingChannel.callerId,
         callerName: incomingChannel.callerName
@@ -430,11 +449,16 @@ function syncActiveCallState() {
         return;
     }
 
-    if (channel.status === "ocupado") {
+    const pairedChannelId = state.currentCall.role === "caller"
+        ? state.currentCall.callerChannelId
+        : state.currentCall.callerChannelId;
+    const pairedChannel = pairedChannelId ? state.channels[pairedChannelId] : null;
+
+    if (channel.status === "ocupado" || pairedChannel?.status === "ocupado") {
         updateHeaderState(`Em chamada com ${state.currentCall.peerName}.`);
     }
 
-    if (channel.status === "livre") {
+    if (channel.status === "livre" || (pairedChannelId && pairedChannel?.status === "livre")) {
         endCall("Canal liberado.");
     }
 }
@@ -469,7 +493,7 @@ async function acceptIncomingCall() {
         return;
     }
 
-    const { channelId, callId, callerName } = state.incomingCall;
+    const { channelId, callId, callerName, callerChannelId } = state.incomingCall;
     const channelRef = ref(database, `${APP_ROOT}/channels/${channelId}`);
 
     const transaction = await runTransaction(channelRef, (current) => {
@@ -493,8 +517,28 @@ async function acceptIncomingCall() {
         acceptedAt: Date.now()
     });
 
+    await update(ref(database, `${APP_ROOT}/channels/${channelId}`), {
+        status: "ocupado",
+        callId,
+        callerChannelId: callerChannelId || "",
+        peerChannelId: callerChannelId || "",
+        ringStartedAt: null,
+        timeoutAt: null
+    });
+
+    if (callerChannelId) {
+        await update(ref(database, `${APP_ROOT}/channels/${callerChannelId}`), {
+            status: "ocupado",
+            callId,
+            peerChannelId: channelId,
+            ringStartedAt: null,
+            timeoutAt: null
+        });
+    }
+
     state.currentCall = {
         channelId,
+        callerChannelId,
         callId,
         role: "callee",
         peerName: callerName
@@ -519,14 +563,14 @@ async function declineIncomingCall(reason) {
         return;
     }
 
-    const { channelId, callId } = state.incomingCall;
+    const { channelId, callerChannelId, callId } = state.incomingCall;
     hideIncomingCallModal();
     await update(ref(database, `${APP_ROOT}/calls/${callId}/meta`), {
         status: "recusada",
         declinedAt: Date.now(),
         reason
     });
-    await resetChannel(channelId, reason);
+    await resetCallChannels(channelId, callerChannelId, reason);
 }
 
 async function setupRtcManager() {
@@ -540,7 +584,7 @@ async function setupRtcManager() {
             await attachRemoteStream(stream);
         },
         onConnectionState: (connectionState) => {
-            if (connectionState === "failed" || connectionState === "disconnected" || connectionState === "closed") {
+            if (connectionState === "failed" || connectionState === "closed") {
                 endCall(`Conexao ${connectionState}.`);
             }
         }
@@ -553,8 +597,8 @@ async function endCall(reason = "Chamada encerrada.") {
         return;
     }
 
-    const { channelId, callId } = state.currentCall;
-    console.log("[call] Encerrando chamada", { channelId, callId, reason });
+    const { channelId, callerChannelId, callId } = state.currentCall;
+    console.log("[call] Encerrando chamada", { channelId, callerChannelId, callId, reason });
 
     if (state.rtcManager) {
         await state.rtcManager.close();
@@ -571,7 +615,7 @@ async function endCall(reason = "Chamada encerrada.") {
     }).catch(() => {});
 
     await remove(ref(database, `${APP_ROOT}/calls/${callId}`)).catch(() => {});
-    await resetChannel(channelId, reason);
+    await resetCallChannels(channelId, callerChannelId, reason);
 
     state.currentCall = null;
     updateHeaderState(reason);
@@ -586,6 +630,8 @@ async function resetChannel(channelId, reason = "") {
         calleeId: "",
         calleeName: "",
         callId: "",
+        callerChannelId: "",
+        peerChannelId: "",
         ringStartedAt: null,
         timeoutAt: null,
         lastEvent: reason || ""
@@ -594,6 +640,11 @@ async function resetChannel(channelId, reason = "") {
     if (channel.callId) {
         await remove(ref(database, `${APP_ROOT}/calls/${channel.callId}`)).catch(() => {});
     }
+}
+
+async function resetCallChannels(primaryChannelId, secondaryChannelId, reason = "") {
+    const channelIds = Array.from(new Set([primaryChannelId, secondaryChannelId].filter(Boolean)));
+    await Promise.allSettled(channelIds.map((channelId) => resetChannel(channelId, reason)));
 }
 
 function updateHeaderState(message) {
@@ -639,7 +690,7 @@ function handleBeforeUnload() {
     }
 
     if (state.currentCall) {
-        resetChannel(state.currentCall.channelId, "Sessao encerrada").catch(() => {});
+        resetCallChannels(state.currentCall.channelId, state.currentCall.callerChannelId, "Sessao encerrada").catch(() => {});
     }
 }
 
