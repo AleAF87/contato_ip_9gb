@@ -113,9 +113,22 @@ select {
     padding: 14px 16px;
     border: 1px solid rgba(255, 255, 255, 0.14);
     border-radius: 14px;
-    background: rgba(255, 255, 255, 0.04);
+    background: rgba(8, 17, 28, 0.92);
     color: var(--text);
     outline: none;
+    appearance: none;
+}
+
+select option {
+    background: #0b1623;
+    color: var(--text);
+}
+
+#home-channel,
+#home-channel option,
+#home-channel optgroup {
+    background-color: #0b1623;
+    color: #ffffff;
 }
 
 input:focus,

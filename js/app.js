@@ -29,6 +29,8 @@ import { WebRTCManager } from "./webrtc.js";
 
 const STORAGE_KEY = "contato_ip_9gb_user";
 const CALL_TIMEOUT_MS = 30000;
+const HEARTBEAT_MS = 15000;
+const STALE_SESSION_MS = 45000;
 
 const state = {
     user: null,
@@ -37,7 +39,8 @@ const state = {
     currentCall: null,
     incomingCall: null,
     listenersStarted: false,
-    rtcManager: null
+    rtcManager: null,
+    heartbeatTimer: null
 };
 
 document.addEventListener("DOMContentLoaded", async () => {
@@ -72,6 +75,7 @@ function setupIndexPage() {
         const homeChannelName = findChannelName(homeChannelId);
 
         try {
+            await cleanupStaleSessions();
             const membersSnapshot = await get(ref(database, `${APP_ROOT}/channels/${homeChannelId}/members`));
             const members = Object.values(membersSnapshot.val() || {}).filter((member) => member?.id);
 
@@ -132,6 +136,7 @@ async function setupAppPage() {
     document.getElementById("current-user-name").textContent = state.user.name;
 
     await ensureInitialData();
+    await cleanupStaleSessions();
     await registerPresence();
     bindUiEvents();
     startRealtimeListeners();
@@ -159,9 +164,14 @@ async function registerPresence() {
     const userRef = ref(database, `${APP_ROOT}/users/${state.user.id}`);
     const presenceRef = ref(database, `${APP_ROOT}/presence/${state.user.id}`);
     const memberRef = ref(database, `${APP_ROOT}/channels/${state.user.homeChannelId}/members/${state.user.id}`);
+    const now = Date.now();
 
     const memberSnapshot = await get(ref(database, `${APP_ROOT}/channels/${state.user.homeChannelId}/members`));
-    const existingMembers = Object.values(memberSnapshot.val() || {}).filter((member) => member?.id && member.id !== state.user.id);
+    const existingMembers = Object.values(memberSnapshot.val() || {}).filter((member) =>
+        member?.id &&
+        member.id !== state.user.id &&
+        !isHeartbeatStale(member.lastHeartbeat || member.joinedAt || 0)
+    );
     if (existingMembers.length) {
         alert(`O canal ${state.user.homeChannelName} ja esta em uso por ${existingMembers[0].name}.`);
         localStorage.removeItem(STORAGE_KEY);
@@ -175,6 +185,7 @@ async function registerPresence() {
         homeChannelName: state.user.homeChannelName,
         status: "online",
         currentChannelId: state.user.homeChannelId,
+        lastHeartbeat: now,
         updatedAt: serverTimestamp()
     });
 
@@ -185,13 +196,15 @@ async function registerPresence() {
         homeChannelName: state.user.homeChannelName,
         online: true,
         currentChannelId: state.user.homeChannelId,
+        lastHeartbeat: now,
         updatedAt: serverTimestamp()
     });
 
     await set(memberRef, {
         id: state.user.id,
         name: state.user.name,
-        joinedAt: Date.now(),
+        joinedAt: now,
+        lastHeartbeat: now,
         homeChannelId: state.user.homeChannelId
     });
 
@@ -201,6 +214,14 @@ async function registerPresence() {
 
     onDisconnect(presenceRef).remove();
     onDisconnect(memberRef).remove();
+    onDisconnect(userRef).update({
+        status: "offline",
+        currentChannelId: "",
+        lastHeartbeat: 0,
+        updatedAt: serverTimestamp()
+    });
+
+    startHeartbeat();
 }
 
 function bindUiEvents() {
@@ -231,6 +252,7 @@ function startRealtimeListeners() {
     onValue(ref(database, `${APP_ROOT}/channels`), async (snapshot) => {
         state.channels = snapshot.val() || {};
         await resetExpiredCallsIfNeeded();
+        await cleanupStaleSessions();
         renderChannels();
         syncIncomingCallState();
         syncActiveCallState();
@@ -598,6 +620,8 @@ function updateHeaderState(message) {
 
 async function cleanupAndExit() {
     try {
+        stopHeartbeat();
+
         if (state.currentCall) {
             await endCall("Usuario saiu do sistema.");
         }
@@ -619,6 +643,8 @@ async function cleanupAndExit() {
 }
 
 function handleBeforeUnload() {
+    stopHeartbeat();
+
     if (state.currentChannelId) {
         remove(ref(database, `${APP_ROOT}/channels/${state.currentChannelId}/members/${state.user.id}`)).catch(() => {});
     }
@@ -668,4 +694,120 @@ function getCallButtonState(channelId, status, members) {
         disabled: false,
         label: "Chamar canal"
     };
+}
+
+function startHeartbeat() {
+    stopHeartbeat();
+
+    updateHeartbeat().catch((error) => {
+        console.warn("[presence] Falha no heartbeat inicial:", error);
+    });
+
+    state.heartbeatTimer = window.setInterval(() => {
+        updateHeartbeat().catch((error) => {
+            console.warn("[presence] Falha ao atualizar heartbeat:", error);
+        });
+    }, HEARTBEAT_MS);
+}
+
+function stopHeartbeat() {
+    if (state.heartbeatTimer) {
+        window.clearInterval(state.heartbeatTimer);
+        state.heartbeatTimer = null;
+    }
+}
+
+async function updateHeartbeat() {
+    if (!state.user?.id || !state.user?.homeChannelId) {
+        return;
+    }
+
+    const now = Date.now();
+    console.log("[presence] Heartbeat", now);
+
+    await Promise.all([
+        update(ref(database, `${APP_ROOT}/users/${state.user.id}`), {
+            status: "online",
+            currentChannelId: state.user.homeChannelId,
+            lastHeartbeat: now,
+            updatedAt: serverTimestamp()
+        }),
+        update(ref(database, `${APP_ROOT}/presence/${state.user.id}`), {
+            online: true,
+            currentChannelId: state.user.homeChannelId,
+            lastHeartbeat: now,
+            updatedAt: serverTimestamp()
+        }),
+        update(ref(database, `${APP_ROOT}/channels/${state.user.homeChannelId}/members/${state.user.id}`), {
+            id: state.user.id,
+            name: state.user.name,
+            homeChannelId: state.user.homeChannelId,
+            lastHeartbeat: now
+        })
+    ]);
+}
+
+async function cleanupStaleSessions() {
+    const usersSnapshot = await get(ref(database, `${APP_ROOT}/users`));
+    const users = usersSnapshot.val() || {};
+    const cleanupTasks = [];
+
+    Object.values(users).forEach((user) => {
+        if (!user?.id) {
+            return;
+        }
+
+        const lastHeartbeat = user.lastHeartbeat || 0;
+        if (!isHeartbeatStale(lastHeartbeat) || user.id === state.user?.id) {
+            return;
+        }
+
+        console.log("[presence] Limpando sessao offline:", user.name || user.id);
+        cleanupTasks.push(cleanupUserSession(user));
+    });
+
+    if (cleanupTasks.length) {
+        await Promise.allSettled(cleanupTasks);
+    }
+}
+
+async function cleanupUserSession(user) {
+    const channelId = user.homeChannelId || user.currentChannelId || "";
+    const tasks = [
+        update(ref(database, `${APP_ROOT}/users/${user.id}`), {
+            status: "offline",
+            currentChannelId: "",
+            lastHeartbeat: 0,
+            updatedAt: serverTimestamp()
+        }).catch(() => {}),
+        remove(ref(database, `${APP_ROOT}/presence/${user.id}`)).catch(() => {})
+    ];
+
+    if (channelId) {
+        tasks.push(remove(ref(database, `${APP_ROOT}/channels/${channelId}/members/${user.id}`)).catch(() => {}));
+
+        const channel = state.channels[channelId];
+        const userWasInCall =
+            channel &&
+            channel.callId &&
+            (channel.callerId === user.id || channel.calleeId === user.id);
+
+        if (userWasInCall) {
+            tasks.push(resetChannel(channelId, "Sessao offline detectada").catch(() => {}));
+        } else {
+            tasks.push(update(ref(database, `${APP_ROOT}/channels/${channelId}`), {
+                updatedAt: Date.now()
+            }).catch(() => {}));
+        }
+    }
+
+    await Promise.allSettled(tasks);
+}
+
+function isHeartbeatStale(lastHeartbeat) {
+    if (!lastHeartbeat) {
+        return true;
+    }
+
+    return Date.now() - lastHeartbeat > STALE_SESSION_MS;
 }
