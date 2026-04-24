@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Painel - Contato IP 9GB</title>
+    <link rel="stylesheet" href="./css/style.css">
+</head>
+<body class="page-app">
+    <main class="app-shell">
+        <header class="topbar">
+            <div>
+                <span class="eyebrow">Painel operacional</span>
+                <h1>Contato IP 9GB</h1>
+                <p class="subtitle">Escolha um canal, acompanhe o status e faca chamadas por audio no navegador.</p>
+            </div>
+            <div class="user-panel">
+                <span class="user-label">Usuario logado</span>
+                <strong id="current-user-name">-</strong>
+                <button id="logout-btn" class="btn btn-secondary" type="button">Sair</button>
+            </div>
+        </header>
+
+        <section class="status-grid">
+            <article class="panel panel-highlight">
+                <h2>Meu canal de recepcao</h2>
+                <p id="current-channel-name">Nenhum canal selecionado</p>
+                <p id="call-status-text" class="helper-text">Seu canal sera usado para receber chamadas.</p>
+                <div class="panel-actions">
+                    <button id="end-call-btn" class="btn btn-danger" type="button">Encerrar</button>
+                </div>
+            </article>
+
+            <article class="panel">
+                <h2>Conexao</h2>
+                <p id="connection-text">Nenhuma chamada em andamento.</p>
+                <p id="channel-members-count" class="helper-text">Usuarios no canal: 0</p>
+            </article>
+        </section>
+
+        <section>
+            <div class="section-heading">
+                <h2>Canais disponiveis</h2>
+                <span class="helper-text">Status em tempo real pelo Firebase</span>
+            </div>
+            <div id="channels-list" class="channels-grid"></div>
+        </section>
+    </main>
+
+    <section id="incoming-call-modal" class="modal hidden" aria-hidden="true">
+        <div class="modal-card">
+            <span class="eyebrow">Chamada recebida</span>
+            <h2 id="incoming-call-title">Nova chamada</h2>
+            <p id="incoming-call-description">Alguem esta chamando voce.</p>
+            <div class="modal-actions">
+                <button id="decline-call-btn" class="btn btn-secondary" type="button">Recusar</button>
+                <button id="accept-call-btn" class="btn btn-primary" type="button">Atender</button>
+            </div>
+        </div>
+    </section>
+
+    <audio id="remote-audio" autoplay playsinline></audio>
+
+    <script type="module" src="./js/app.js"></script>
+</body>
+</html>
